@@ -1,84 +1,59 @@
-- name: Coping {{COMPONENT}} repo file 
+- name: Copy MySQL repo file
   ansible.builtin.copy:
-    src: mysql.repo 
-    dest: /etc/yum.repos.d/mongodb.repo  
+    src: mysql.repo
+    dest: /etc/yum.repos.d/mysql.repo
 
-- name: Installing {{COMPONENT}}
+- name: Install MySQL Server
   ansible.builtin.yum:
-    name: 
+    name:
      - mysql-community-server
      - MySQL-python
-    state: installed 
+    state: installed
 
-# Added as Schema Load Needs PyMySQL
-- name: Installing PyMySQL
-  ansible.builtin.shell: pip3 install PyMySQL
-  
-- name: Starting MySQL Service
+- name: Start MySQL Service
   ansible.builtin.systemd:
     name: mysqld
     state: restarted
     enabled: yes
-# This has to fetch the password only when the default password is not changed
 
-- name: Check the {{COMPONENT}} password by fetching from the logs 
-  community.mysql.mysql_info:
-    login_user: root 
-    login_password: RoboShop@1 
-  ignore_errors: yes  
-  register: mysql_stat 
+- name: Check Root Default Password
+  block:
+    - name: Get MySQL version to check the DB Connection
+      mysql_info:
+        login_user: root
+        login_password: "{{MYSQL_PASSWORD}}"
+        filter: version
+  rescue:
+    - name: Load MYSQL Log File
+      ansible.builtin.slurp:
+        src: /var/log/mysqld.log
+      register: mysql_log
 
-# This will only be executed only if the above is a failure
-- name: Reset Password 
-  when: mysql_stat.failed 
-  block: 
-    - name: Fetching password 
-      ansible.builtin.shell: grep "temporary" /var/log/mysqld.log | head -n 1 | awk -F " " '{print $NF}'
-      register: DEFAULT_ROOT_PASSWORD
+    - name: Declare Facts
+      ansible.builtin.set_fact:
+        DEFAULT_PASS: "{{mysql_log['content'] | b64decode | regex_findall('.*temporary password.*') | join(' ') |split(' ') | last }}"
 
-    - name: Copy the SQL Password Command File 
-      ansible.builtin.copy: 
-        src: rootpassword.sql 
-        dest: /tmp/rootpassword.sql 
-    # This task should only execture if the above task is a failure.
-    - name: Changing password 
-      ansible.builtin.shell: mysql --connect-expired-password  -uroot -p"{{DEFAULT_ROOT_PASSWORD.stdout}}" < /tmp/rootpassword.sql 
-      ignore_errors: yes
+    - name: Change MySQL
+      ansible.builtin.shell: echo "ALTER USER 'root'@'localhost' IDENTIFIED BY '{{MYSQL_PASSWORD}}';" | mysql --connect-expired-password -uroot -p"{{DEFAULT_PASS}}"
 
-- name: Checking the validate_password plugin 
-  ansible.builtin.shell: echo show plugins | mysql -uroot -pRoboShop@1 | grep validate_password 
-  register: PLUGIN_INFO 
-  ignore_errors: yes 
+- name: Check Validate plugin exists
+  ansible.builtin.shell: echo "uninstall plugin validate_password;" | mysql -uroot -p{{MYSQL_PASSWORD}}
+  ignore_errors: yes
 
-# This task should only execture if the above task is a failure: Which means plugin exists 
-- name: Uninstalling the plugin  
-  when: PLUGIN_INFO.rc == 0 
-  block: 
-    - name: Copy the SQL Unistall Password Plugin file 
-      ansible.builtin.copy: 
-        src: password-validate.sql
-        dest: /tmp/password-validate.sql
+- name: Download and extracting MySQL 
+  ansible.builtin.include_role:
+    name: common
+    tasks_from: download
 
-    - name: Uninstalling the Plugin 
-      ansible.builtin.shell: mysql --connect-expired-password  -uroot -pRoboShop@1 < /tmp/password-validate.sql
-
-- name: Download and extract {{COMPONENT}}
-  ansible.builtin.unarchive:
-    src: https://github.com/stans-robot-project/{{COMPONENT}}/archive/main.zip
-    dest: /tmp 
-    remote_src: yes
-
-- name: Load the {{COMPONENT}} schema 
+- name: Load Schema 
   community.mysql.mysql_db:
     state: import
+    name: all
+    target: /tmp/mysql-main/shipping.sql
     login_user: root 
     login_password: RoboShop@1
-    name: all 
-    target: /tmp/mysql-main/shipping.sql 
 
-- name: Configuing system name 
+- name: Doing set-hostname 
   ansible.builtin.include_role:
-    name: common 
+    name: common
     tasks_from: set-hostname
-
-    
